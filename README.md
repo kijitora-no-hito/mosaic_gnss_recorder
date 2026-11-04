@@ -2,6 +2,21 @@
 
 Septentrio mosaic 受信機に接続して、測位状況と QZSS L6 の受信状況を見ながらログを保存するツールです。
 
+使える測位手法は次のとおりです。受信機内蔵のエンジンは「受信機設定」タブで切り替え、このソフトウェアのエンジン(MALIB・CLASLIB)は受信機の測位と並行して動かせます。
+
+| 測位手法 | 受信機内蔵エンジン<br>リアルタイム | このソフトウェア<br>リアルタイム | このソフトウェア<br>後処理 |
+|---|:---:|:---:|:---:|
+| 単独測位 | ○ | | |
+| SBAS | ○ | | |
+| Galileo HAS PPP | ○ ※1 | | |
+| RTK | ○ ※2 | | |
+| MADOCA-PPP | | ○ ※3 | |
+| CLAS(PPP-RTK) | | ○ ※3 | ○ ※3 |
+
+※1 HAS 対応の受信機(Capabilities に PPPGalileoHAS-SIS があるもの)。
+※2 基準局の補正データ(NTRIP など)を受信機へ別途入力する。
+※3 QZSS L6 を受信できる受信機が必要。後処理は記録済みの SBF を使う(RxTools の sbf2rin で RINEX に変換する)。
+
 操作方法と測位モードごとの使い方は [docs/manual.md](docs/manual.md)(PDF 版: [docs/manual.pdf](docs/manual.pdf))を見てください。
 
 ![記録中の画面(測位履歴タブ)](docs/images/04_history.png)
