@@ -4,23 +4,54 @@ Septentrio mosaic 受信機に接続して、測位状況と QZSS L6 の受信�
 
 操作方法と測位モードごとの使い方は [docs/manual.md](docs/manual.md)(PDF 版: [docs/manual.pdf](docs/manual.pdf))を見てください。
 
-## 起動
+![記録中の画面(測位履歴タブ)](docs/images/04_history.png)
 
-リポジトリのルートで実行します。
+## インストーラ版を使う場合
 
-```
-pip install -r requirements.txt
-python -m mosaic_gnss_recorder
-```
+### 用意するもの
 
-exe 版は `packaging/build.ps1` で作ります。
-MADOCA / CLAS の測位エンジンは `engines/build_engines.ps1` で作ります(MALIB・CLASLIB のソースと MSYS2 の gcc が必要。build.ps1 から自動で呼ばれます)。
-PyInstaller と Inno Setup 6 が必要で、インストーラは `packaging/Output/` にできます。
-インストールするとスタートメニューに mosaic_gnss_recorder が追加されます。管理者権限は不要です。
-exe 版の既定の保存先は「ドキュメント\\mosaic_gnss_recorder」です。
+- Windows 10 / 11 の PC
+- Septentrio mosaic 受信機(mosaic-G5 / mosaic-X5 など)と USB ケーブル、GNSS アンテナ
+- RxTools(Septentrio の Web サイトから入手)。**USB Driver 付きで**インストールする。
+  Septentrio の USB ドライバと、CLAS 後処理で使う sbf2rin はこれに含まれる(このアプリには同梱していない)
+- CLAS / MADOCA を使う場合: QZSS L6 を受信できる受信機とアンテナ
 
-Septentrio の USB ドライバは同梱していません。RxTools を USB Driver 付きでインストールしてください。
-ドライバが無い場合、インストーラが案内を表示します。
+### インストール
+
+1. [Releases](https://github.com/kijitora-no-hito/mosaic_gnss_recorder/releases) から
+   `mosaic_gnss_recorder_Setup.exe` をダウンロードして実行する。管理者権限は不要
+2. スタートメニューに mosaic_gnss_recorder が追加される
+
+MADOCA / CLAS の測位エンジンも同梱しています。既定の保存先は「ドキュメント\\mosaic_gnss_recorder」です。
+USB ドライバが無い場合、インストーラが案内を表示します。
+
+## ソースからビルドする場合
+
+### 用意するもの
+
+| 用途 | 必要なもの |
+|---|---|
+| 実行 | Python 3.11、`pip install -r requirements.txt`(PySide6、pyserial)、RxTools(USB Driver 付き) |
+| MADOCA / CLAS のエンジン | [MALIB](https://github.com/JAXA-SNU/MALIB) と [CLASLIB](https://github.com/QZSS-Strategy-Office/claslib) の clone、[MSYS2](https://www.msys2.org/) の ucrt64 gcc(`pacman -S mingw-w64-ucrt-x86_64-gcc`)。CLASLIB の `util\rnx2rtkp` は CLASLIB の手順で先にビルドしておく |
+| インストーラ | PyInstaller、[Inno Setup 6](https://jrsoftware.org/isinfo.php) |
+
+### 手順
+
+1. 実行する(リポジトリのルートで)。エンジンが無くても、記録・表示・KML 出力は使える
+   ```
+   pip install -r requirements.txt
+   python -m mosaic_gnss_recorder
+   ```
+2. MADOCA / CLAS のエンジンを作る。`engines\bin`、`engines\data`、`engines\licenses` にできる。
+   MALIB・CLASLIB・MSYS2 の場所は既定で `C:\work\60_tools\MALIB`、`C:\work\60_tools\claslib`、`C:\msys64`。
+   違う場所なら引数で指定する
+   ```
+   powershell -ExecutionPolicy Bypass -File engines\build_engines.ps1 -Malib <MALIB> -Claslib <CLASLIB> -Msys <MSYS2>
+   ```
+3. インストーラを作る。`packaging\Output\` にできる。エンジンが未作成なら 2. を自動で呼ぶ(既定の場所を使う)
+   ```
+   powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+   ```
 
 ## 使い方
 
@@ -42,6 +73,8 @@ Septentrio の USB ドライバは同梱していません。RxTools を USB Dri
 ## 受信機の設定
 
 「受信機設定」タブで、現在の設定の確認と変更ができます。接続すると現在値を自動で読み出します。
+
+![受信機設定タブ](docs/images/02_connected.png)
 
 - やりたい測位: Galileo HAS PPP、Galileo HAS PPP + L6 記録、単独測位、SBAS、RTK から選ぶと、
   関係する項目が選択済みになる。選んだだけでは受信機に送らない。RTK は補正データの入力が別途必要
@@ -84,6 +117,9 @@ COM ポートは 1 つのアプリしか開けないので、記録しながら�
 受け取り側の例(RTKLIB 系の入力ストリーム設定): 種類 TCP Client、アドレス `localhost:28785`、形式 SBF。
 MADOCA-PPP の L6E を使う場合は、[受信設定を投入] で QZSRawL6E を出力しておきます。
 このアプリの [MADOCA リアルタイム開始] / [CLAS リアルタイム開始] も、この配信を入力にしています。
+
+![CLAS リアルタイムが FIX している画面](docs/images/10_clas_rt.png)
+
 `engines/clas_rt/clas_rt.c` は CLASLIB の後処理ルーチンに SBF の読み取り(MALIB から移植)と TCP 受信を足したものです。
 補正の組が揃うのを待つため、観測を 5 秒遅らせて測位します。
 `engines/malib_rt/septentrio.c` は MALIB の SBF デコーダの複製で、L6 を 1 衛星に絞り、RS 復号に失敗したフレームの後は
