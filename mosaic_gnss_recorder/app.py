@@ -1,6 +1,7 @@
 """mosaic_gnss_recorder の GUI。起動: python -m mosaic_gnss_recorder
 
-受信機の設定は [受信設定を投入] を押したときだけ変更する(Current のみ。Boot には保存しない)。
+受信機の設定は [受信設定を投入] と受信機設定タブの [変更を送信] を押したときだけ変更する
+(Current のみ。Boot には保存しない)。
 緯度経度と地図は既定で OFF にし、「表示」メニューで切り替える。
 地図は ON にするまで作らないので、OFF の間は地図サーバへ接続しない。
 """
@@ -12,14 +13,18 @@ import sys
 from PySide6.QtCore import QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget)
 
 from . import charts
+from . import engines
+from . import kml_export
 from . import sbf_parser as sp
 from . import serial_link as link
+from . import settings
+from . import tcp_server
 from .map_view import MapView
 from .state import BANDS
 
@@ -160,6 +165,10 @@ class MainWindow(QMainWindow):
         self.resize(1280, 860)
         self.pipeline = link.Pipeline()
         self.source = None
+        self.server = None
+        self.madoca = engines.MadocaEngine()
+        self.clas_rt = engines.ClasRtEngine()
+        self.clas_job = None
         self.status = {}
         self.map_view = None
         self._build_menu()
@@ -186,6 +195,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.addLayout(self._build_connection_bar())
         layout.addLayout(self._build_record_bar())
+        layout.addLayout(self._build_engine_bar())
         split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(self._build_tables())
         split.addWidget(self._build_lower())
@@ -227,9 +237,44 @@ class MainWindow(QMainWindow):
             self.speed_box.addItem(label, speed)
         self.replay_button = QPushButton("SBF再生")
         self.replay_button.clicked.connect(self.toggle_replay)
+        kml_button = QPushButton("KML出力")
+        kml_button.clicked.connect(self.export_kml)
+        self.tcp_check = QCheckBox("TCP配信")
+        self.tcp_check.setToolTip("受信した SBF を 127.0.0.1 の指定ポートで配信する")
+        self.tcp_check.toggled.connect(self.set_tcp_server)
+        self.tcp_port = QSpinBox()
+        self.tcp_port.setRange(1024, 65535)
+        self.tcp_port.setValue(tcp_server.DEFAULT_PORT)
         for widget in (QLabel("保存先:"), self.folder_edit, folder_button,
-                       self.record_button, self.speed_box, self.replay_button):
+                       self.record_button, self.speed_box, self.replay_button, kml_button,
+                       self.tcp_check, self.tcp_port):
             row.addWidget(widget)
+        return row
+
+    def _build_engine_bar(self):
+        """補正 PPP(MADOCA / CLAS リアルタイム、CLAS 後処理)の操作列を作る。"""
+        row = QHBoxLayout()
+        self.motion_box = QComboBox()
+        for key, label in engines.MOTIONS.items():
+            self.motion_box.addItem(label, key)
+        self.motion_box.setToolTip("MADOCA / CLAS の設定を移動体向けか静止向けにする。\n"
+                                   "開始したときの選択を使う(実行中に変えたら、止めて開始し直す)")
+        self.madoca_button = QPushButton("MADOCA リアルタイム開始")
+        self.madoca_button.setToolTip("受信した SBF の L6E で MADOCA-PPP を計算する(TCP 配信を使う)")
+        self.madoca_button.clicked.connect(self.toggle_madoca)
+        self.madoca_label = QLabel("停止中")
+        self.clas_rt_button = QPushButton("CLAS リアルタイム開始")
+        self.clas_rt_button.setToolTip("受信した SBF の L6D で CLAS(PPP-RTK)を計算する(TCP 配信を使う)")
+        self.clas_rt_button.clicked.connect(self.toggle_clas_rt)
+        self.clas_rt_label = QLabel("停止中")
+        self.clas_button = QPushButton("CLAS 後処理")
+        self.clas_button.setToolTip("記録済みの SBF を CLAS で処理し、pos と KML を作る")
+        self.clas_button.clicked.connect(self.start_clas)
+        self.clas_label = QLabel("")
+        for widget in (QLabel("補正 PPP:"), self.motion_box, self.madoca_button, self.madoca_label,
+                       self.clas_rt_button, self.clas_rt_label, self.clas_button, self.clas_label):
+            row.addWidget(widget)
+        row.addStretch(1)
         return row
 
     def _build_status_box(self):
@@ -243,7 +288,8 @@ class MainWindow(QMainWindow):
         for key, label in (("lat", "緯度"), ("lon", "経度"), ("height", "楕円体高"),
                            ("nrsv", "使用衛星数"), ("hacc", "水平精度"), ("vacc", "垂直精度"),
                            ("speed", "速度"), ("tow", "TOW"), ("blocks", "受信ブロック"),
-                           ("crc", "CRC/解析エラー"), ("record", "記録")):
+                           ("crc", "CRC/解析エラー"), ("record", "記録"), ("tcp", "TCP配信"),
+                           ("madoca", "MADOCA"), ("clas_rt", "CLAS")):
             self.status[key] = QLabel("—")
             self.status_form.addRow(label, self.status[key])
         self.warning_label = QLabel("")
@@ -286,7 +332,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.cn0_chart, "QZSS C/N0")
         self.tabs.addTab(self.pvt_panel, "測位履歴")
         self.tabs.addTab(self.sky_plot, "スカイプロット")
+        self.settings_panel = settings.SettingsPanel(self.read_settings, self.send_settings)
         self.tabs.addTab(self.satellite_table, "全衛星")
+        self.tabs.addTab(self.settings_panel, "受信機設定")
         self.window_box = QComboBox()
         for label, seconds in charts.TIME_WINDOWS:
             self.window_box.addItem(label, seconds)
@@ -341,6 +389,7 @@ class MainWindow(QMainWindow):
         self.setup_button.setEnabled(serial_on)
         self.stop_output_button.setEnabled(serial_on)
         self.command_edit.setEnabled(serial_on)
+        self.settings_panel.setEnabled(serial_on)
         self.replay_button.setText("再生停止" if replay_on else "SBF再生")
         self.replay_button.setEnabled(not serial_on)
         self.record_button.setText("記録停止" if recording else "記録開始")
@@ -355,6 +404,7 @@ class MainWindow(QMainWindow):
     def _start(self, source):
         """データ源を切り替えて開始する。"""
         self.pipeline = link.Pipeline()
+        self.pipeline.server = self.server
         source.pipeline = self.pipeline
         self.cn0_chart.clear()
         self.pvt_panel.clear()
@@ -381,6 +431,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "mosaic_gnss_recorder", "COM ポートが見つかりません。")
             return
         self._start(link.SerialSource(self.pipeline, port))
+        self.read_settings()
 
     def toggle_replay(self):
         """SBF の再生を開始/停止する。"""
@@ -396,6 +447,107 @@ class MainWindow(QMainWindow):
         """指定の SBF を再生する。"""
         self._start(link.ReplaySource(self.pipeline, path, speed))
         self.info_label.setText(f"再生中: {os.path.basename(path)}")
+
+    def export_kml(self):
+        """記録済みの SBF を KML に変換する。"""
+        paths, _ = QFileDialog.getOpenFileNames(self, "KML にする SBF を選ぶ",
+                                                self.folder_edit.text(), "SBF (*.sbf *.*)")
+        if not paths:
+            return
+        output, _ = QFileDialog.getSaveFileName(self, "KML の保存先",
+                                                os.path.splitext(paths[0])[0] + ".kml",
+                                                "KML (*.kml)")
+        if not output:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            title = os.path.splitext(os.path.basename(output))[0]
+            count = kml_export.export(paths, output, title)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "mosaic_gnss_recorder", f"KML を作れません: {exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        QMessageBox.information(self, "mosaic_gnss_recorder", f"{count} 点を出力しました。\n{output}")
+
+    def set_tcp_server(self, enabled):
+        """SBF の TCP 配信を開始/停止する。"""
+        if self.server is not None:
+            self.pipeline.server = None
+            self.server.close()
+            self.server = None
+        if enabled:
+            try:
+                self.server = tcp_server.SbfTcpServer(self.tcp_port.value())
+            except OSError as exc:
+                QMessageBox.warning(self, "mosaic_gnss_recorder", f"TCP 配信を開始できません: {exc}")
+                self.tcp_check.setChecked(False)
+                return
+            self.pipeline.server = self.server
+        self.tcp_port.setEnabled(not enabled)
+
+    def toggle_madoca(self):
+        """MADOCA リアルタイムを開始/停止する。"""
+        self._toggle_engine(self.madoca, "MADOCA")
+
+    def toggle_clas_rt(self):
+        """CLAS リアルタイムを開始/停止する。"""
+        self._toggle_engine(self.clas_rt, "CLAS")
+
+    def _toggle_engine(self, engine, name):
+        """リアルタイムエンジンを開始/停止する。入力は TCP 配信なので、止まっていれば開始する。"""
+        if engine.running:
+            engine.stop()
+            return
+        if self.server is None:
+            self.tcp_check.setChecked(True)
+            if self.server is None:
+                return
+        try:
+            pos = engine.start(self.server.port, self.folder_edit.text(),
+                               self.motion_box.currentData())
+        except OSError as exc:
+            QMessageBox.warning(self, "mosaic_gnss_recorder", f"{name} を開始できません: {exc}")
+            return
+        self.info_label.setText(f"{name} の解: {pos}")
+
+    def start_clas(self):
+        """記録済みの SBF を選んで CLAS の後処理を始める。"""
+        paths, _ = QFileDialog.getOpenFileNames(self, "CLAS で処理する SBF を選ぶ",
+                                                self.folder_edit.text(), "SBF (*.sbf *.*)")
+        if not paths:
+            return
+        self.clas_job = engines.ClasJob(sorted(paths), os.path.splitext(paths[0])[0],
+                                        motion=self.motion_box.currentData())
+        self.clas_job.start()
+
+    def _update_engines(self):
+        """補正 PPP の状態表示と、CLAS 後処理の完了を扱う。"""
+        for engine, key, name, button, label in (
+                (self.madoca, "madoca", "MADOCA", self.madoca_button, self.madoca_label),
+                (self.clas_rt, "clas_rt", "CLAS", self.clas_rt_button, self.clas_rt_label)):
+            running = engine.running
+            button.setText(f"{name} 停止" if running else f"{name} リアルタイム開始")
+            label.setText(engines.quality_text(engine.snapshot()[0]) if running else "停止中")
+            self.status[key].setText(label.text())
+        job = self.clas_job
+        self.clas_button.setEnabled(job is None or not job.is_alive())
+        if job is None:
+            return
+        if job.is_alive():
+            self.clas_label.setText(f"CLAS: {job.step}")
+            return
+        self.clas_job = None
+        if job.error:
+            self.clas_label.setText("CLAS: 失敗")
+            QMessageBox.warning(self, "mosaic_gnss_recorder",
+                                f"CLAS の処理に失敗しました。\n{job.error}")
+            return
+        pos, kml, counts = job.result
+        summary = "、".join(f"{name} {count}" for name, count in counts.items())
+        self.clas_label.setText(f"CLAS: 完了({summary})")
+        QMessageBox.information(self, "mosaic_gnss_recorder",
+                                f"CLAS の処理が終わりました。\n{summary}\n{pos}\n{kml}")
 
     def choose_folder(self):
         """保存先を選ぶ。"""
@@ -432,6 +584,21 @@ class MainWindow(QMainWindow):
         if command:
             self.source.send([command])
             self.command_edit.clear()
+
+    def read_settings(self):
+        """受信機の現在の設定を読み出す。"""
+        self.source.send(settings.READ_COMMANDS)
+
+    def send_settings(self, commands):
+        """確認のうえ設定を送り、結果を読み直す。"""
+        text = "次のコマンドを送信します。Boot には保存しません。\n\n" + "\n".join(commands)
+        if settings.restarts_tracking(commands):
+            text += "\n\n衛星の追尾がいったん止まり、再捕捉が始まります。"
+        answer = QMessageBox.question(self, "mosaic_gnss_recorder", text)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.pipeline.info.pop("error", None)
+            self.settings_panel.status_label.setText("送信しました。")
+            self.source.send([*commands, *settings.READ_COMMANDS])
 
     def _drain_console(self):
         """受信した文字列をコンソールへ移す。"""
@@ -493,6 +660,9 @@ class MainWindow(QMainWindow):
         self.status["record"].setText(
             f"{os.path.basename(log[0])}\nSBF {log[1] / 1e6:.1f} MB / L6 {log[2]} 個"
             if log else "停止中")
+        self.status["tcp"].setText(
+            f"127.0.0.1:{self.server.port} / 接続 {self.server.client_count}"
+            if self.server else "停止中")
         self.warning_label.setText(self._warnings(snap))
 
     def _update_views(self, snap):
@@ -509,23 +679,32 @@ class MainWindow(QMainWindow):
             fill_table(self.satellite_table, satellite_rows(snap))
         if self.map_view is not None:
             self.map_view.set_track(snap["pvt_history"])
+            self.map_view.set_engine_track("madoca", self.madoca.snapshot()[1])
+            self.map_view.set_engine_track("clas", self.clas_rt.snapshot()[1])
 
     def refresh(self):
         """画面を更新する。"""
         self._check_source()
         self._drain_console()
         self._update_info()
+        self.settings_panel.update_from(self.pipeline.settings,
+                                        self.pipeline.info.get("signals"),
+                                        self.pipeline.info.get("error"))
         snap = self.pipeline.state.snapshot()
         self._update_status(snap)
         fill_table(self.qzss_table, qzss_rows(snap))
         fill_table(self.l6_table, l6_rows(snap))
         fill_table(self.signal_table, signal_rows(snap))
         self._update_views(snap)
+        self._update_engines()
         self._update_buttons()
 
     def closeEvent(self, event):  # pylint: disable=invalid-name
-        """閉じるときにスレッドと記録を止める。"""
+        """閉じるときにスレッドと記録と配信を止める。"""
         self._stop_source()
+        self.madoca.stop()
+        self.clas_rt.stop()
+        self.set_tcp_server(False)
         event.accept()
 
 

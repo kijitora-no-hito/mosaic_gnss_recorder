@@ -2,6 +2,8 @@
 
 Septentrio mosaic 受信機に接続して、測位状況と QZSS L6 の受信状況を見ながらログを保存するツールです。
 
+操作方法と測位モードごとの使い方は [docs/manual.md](docs/manual.md)(PDF 版: [docs/manual.pdf](docs/manual.pdf))を見てください。
+
 ## 起動
 
 リポジトリのルートで実行します。
@@ -12,6 +14,7 @@ python -m mosaic_gnss_recorder
 ```
 
 exe 版は `packaging/build.ps1` で作ります。
+MADOCA / CLAS の測位エンジンは `engines/build_engines.ps1` で作ります(MALIB・CLASLIB のソースと MSYS2 の gcc が必要。build.ps1 から自動で呼ばれます)。
 PyInstaller と Inno Setup 6 が必要で、インストーラは `packaging/Output/` にできます。
 インストールするとスタートメニューに mosaic_gnss_recorder が追加されます。管理者権限は不要です。
 exe 版の既定の保存先は「ドキュメント\\mosaic_gnss_recorder」です。
@@ -26,7 +29,7 @@ Septentrio の USB ドライバは同梱していません。RxTools を USB Dri
 2. [受信設定を投入] を押す。送るコマンドは次の 2 つ。Current だけを変更し、Boot には保存しない
    ```
    setSignalTracking,+QZSL6
-   setSBFOutput,Stream10,<接続中のポート>,Rinex+PVTGeod+Status+GALRawCNAV+QZSRawL6D+QZSRawL6E,sec1
+   setSBFOutput,Stream10,<接続中のポート>,Rinex+RawNavBits+PVTGeod+Status+GALRawCNAV+QZSRawL6D+QZSRawL6E,sec1
    ```
    L6 に対応しない受信機(Capabilities に QZSL6 が無いもの)には、L6 に関する部分を除いて送る
 3. 保存先を確認して [記録開始] を押す
@@ -35,6 +38,20 @@ Septentrio の USB ドライバは同梱していません。RxTools を USB Dri
 電源を入れ直すと、受信機は Boot の設定に戻ります。
 
 右下の欄からは、任意のコマンドを送れます(`getPVTMode` など)。
+
+## 受信機の設定
+
+「受信機設定」タブで、現在の設定の確認と変更ができます。接続すると現在値を自動で読み出します。
+
+- やりたい測位: Galileo HAS PPP、Galileo HAS PPP + L6 記録、単独測位、SBAS、RTK から選ぶと、
+  関係する項目が選択済みになる。選んだだけでは受信機に送らない。RTK は補正データの入力が別途必要
+- プルダウン: 測位モード、仰角マスク(追尾/測位)、受信機ダイナミクス、マルチパス抑制、SBAS 補正
+- チェックボックス: 衛星系、信号。信号は受信機が対応するものだけ表示する
+
+[変更を送信] を押すと、送るコマンドの一覧を確認したうえで、変更した項目だけを送り、値を読み直します。
+変更されるのは Current だけで、電源を入れ直すと Boot の設定に戻ります。
+衛星系や信号を変えると、追尾がいったん止まって再捕捉が始まります。
+受信機が受け付けなかった場合は、タブの下にエラーを表示します。
 
 ## 保存されるファイル
 
@@ -46,6 +63,32 @@ Septentrio の USB ドライバは同梱していません。RxTools を USB Dri
 | `mosaic_日時_L6E_Jnn.l6` | MADOCA-PPP 用。形式は同じ |
 
 既存のファイルは上書きしません。
+
+## KML 出力
+
+[KML出力] で記録済みの SBF を選び(複数可)、保存先を指定すると、Google Earth などで開ける KML を作ります。
+軌跡と各エポックの点を測位モードで色分けし、モードごとのフォルダに分けるので、表示を切り替えて確認できます。
+点には時刻(JST)、測位モード、衛星数、推定精度が入ります。受信機とは通信しないので、記録中でも使えます。
+位置の無いエポックは出力しません。**KML は位置情報を含みます。**
+
+## TCP 配信
+
+[TCP配信] にチェックを入れると、受信した SBF ブロック(CRC 検査を通ったもの)を、そのまま TCP で配信します。
+COM ポートは 1 つのアプリしか開けないので、記録しながら別の測位ソフトで処理したいときに使います。
+
+- 待ち受けは `127.0.0.1`(この PC 内)だけです。ポート番号は既定で 28785 です
+- コマンドの応答文字列は送りません。受信機の設定は変えません
+- SBF の再生中も配信するので、記録済みのデータをリアルタイムと同じように流せます
+- 受け取り側が詰まって 1 MB 以上溜まった場合は、その接続を切ります
+
+受け取り側の例(RTKLIB 系の入力ストリーム設定): 種類 TCP Client、アドレス `localhost:28785`、形式 SBF。
+MADOCA-PPP の L6E を使う場合は、[受信設定を投入] で QZSRawL6E を出力しておきます。
+このアプリの [MADOCA リアルタイム開始] / [CLAS リアルタイム開始] も、この配信を入力にしています。
+`engines/clas_rt/clas_rt.c` は CLASLIB の後処理ルーチンに SBF の読み取り(MALIB から移植)と TCP 受信を足したものです。
+補正の組が揃うのを待つため、観測を 5 秒遅らせて測位します。
+`engines/malib_rt/septentrio.c` は MALIB の SBF デコーダの複製で、L6 を 1 衛星に絞り、RS 復号に失敗したフレームの後は
+次のサブフレーム先頭まで捨てる処理を足しています(欠けたまま連結すると補正がずれるため)。
+記録の `.l6` と CLAS 後処理用の L6D も、同じ規則で欠けを除いています。
 
 ## 実機なしで試す
 
@@ -84,7 +127,11 @@ Septentrio の USB ドライバは同梱していません。RxTools を USB Dri
 | `sbf_parser.py` | SBF の分離(CRC 検査)とデコード |
 | `state.py` | 集計 |
 | `logger.py` | ファイル保存 |
+| `kml_export.py` | SBF から KML への変換 |
+| `tcp_server.py` | SBF の TCP 配信 |
+| `engines.py` | MADOCA / CLAS リアルタイム(malib_rt / clas_rt)と CLAS 後処理(CLASLIB)の実行 |
 | `serial_link.py` | COM ポートの入出力、再生、コマンド送信 |
+| `settings.py` | 受信機設定の解析、コマンドの組み立て、設定画面 |
 | `charts.py` | グラフとスカイプロット |
 | `map_view.py` | 地図 |
 | `app.py` | GUI |

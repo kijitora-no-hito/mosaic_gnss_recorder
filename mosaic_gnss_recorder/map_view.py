@@ -24,6 +24,11 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 }).addTo(map);
 var track = L.polyline([], {color: '#2980b9', weight: 3}).addTo(map);
 var marker = null;
+var engineTracks = {
+  madoca: L.polyline([], {color: '#27ae60', weight: 3}).addTo(map),
+  clas: L.polyline([], {color: '#8e44ad', weight: 3}).addTo(map)
+};
+function updateEngine(name, points) { engineTracks[name].setLatLngs(points); }
 function updatePosition(points) {
   if (!points.length) { return; }
   var last = points[points.length - 1];
@@ -40,9 +45,8 @@ function updatePosition(points) {
 """
 
 
-def track_points(points):
-    """測位履歴を [緯度, 経度] のリストにする。多すぎるときは間引く。"""
-    fixes = [(p.latitude, p.longitude) for _t, p in points if p.latitude is not None]
+def thin(fixes):
+    """[(緯度, 経度)] を MAX_TRACK_POINTS 点以下に間引き、末尾は残す。"""
     if not fixes:
         return []
     step = max(1, len(fixes) // MAX_TRACK_POINTS)
@@ -50,6 +54,11 @@ def track_points(points):
     if sampled[-1] != fixes[-1]:
         sampled.append(fixes[-1])
     return [[round(lat, 7), round(lon, 7)] for lat, lon in sampled]
+
+
+def track_points(points):
+    """測位履歴を [緯度, 経度] のリストにする。多すぎるときは間引く。"""
+    return thin([(p.latitude, p.longitude) for _t, p in points if p.latitude is not None])
 
 
 class MapView(QWebEngineView):
@@ -69,3 +78,10 @@ class MapView(QWebEngineView):
         """測位履歴を地図へ反映する。"""
         if self._ready:
             self.page().runJavaScript(f"updatePosition({json.dumps(track_points(points))});")
+
+    def set_engine_track(self, name, points):
+        """外部エンジンの解の履歴 [(時刻, 解)] を重ねる。name は madoca(緑)か clas(紫)。"""
+        if self._ready:
+            fixes = [(p.latitude, p.longitude) for _t, p in points if p.latitude is not None]
+            script = f"updateEngine({json.dumps(name)}, {json.dumps(thin(fixes))});"
+            self.page().runJavaScript(script)

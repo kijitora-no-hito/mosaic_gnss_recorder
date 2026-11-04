@@ -8,3 +8,6 @@ logs/
 *.sbf
 *.l6
 *_pvt.csv
+engines/bin/
+engines/data/
+engines/licenses/

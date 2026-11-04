@@ -25,6 +25,7 @@ class SessionLogger:  # pylint: disable=too-many-instance-attributes
         self._csv = csv.writer(self._csv_file)
         self._csv.writerow(CSV_COLUMNS)
         self._l6_files = {}
+        self._l6_gate = sp.L6Continuity()
         self._next_flush = time.monotonic() + FLUSH_INTERVAL
         self.sbf_bytes = 0
         self.l6_messages = 0
@@ -37,8 +38,11 @@ class SessionLogger:  # pylint: disable=too-many-instance-attributes
             self.flush()
 
     def write_l6(self, msg):
-        """RS 復号に成功した L6 メッセージを衛星・チャネル別の .l6 に書く。"""
-        if not msg.parity:
+        """L6 メッセージを衛星・チャネル別の .l6 に書く。
+
+        RS 復号に失敗したもの、欠けの後で次のサブフレーム先頭が来るまでのものは書かない。
+        """
+        if not self._l6_gate.accept(msg):
             return
         key = (msg.channel, msg.svid)
         if key not in self._l6_files:

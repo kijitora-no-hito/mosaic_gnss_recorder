@@ -10,6 +10,7 @@ from serial.tools import list_ports
 
 from .logger import SessionLogger
 from .sbf_parser import L6Message, Pvt, SbfStream
+from .settings import parse_reply
 from .state import MonitorState
 
 BAUDRATE = 115200
@@ -17,11 +18,14 @@ COMMAND_TIMEOUT = 3.0
 PROMPT_RE = re.compile(r"\b(COM\d|USB\d|IP\d\d|NTR\d|IPS\d|IPR\d)>")
 PRODUCT_RE = re.compile(r'hwplatform product="([^"]+)"')
 FIRMWARE_RE = re.compile(r'<firmware version="([^"]+)"')
+CAPABILITY_RE = re.compile(r"ReceiverCapabilities,\s*[^,]*,\s*([^,\s]+)")
+ERROR_RE = re.compile(r"\$R\?\s*(.+)")
 TEXT_TAIL = 65536
 NON_TEXT_RE = re.compile(r"[^ -~\t\r\n]")
 MAX_NON_TEXT_RATIO = 0.1
 L6_STREAM = "Stream10"
-BASE_MESSAGES = "Rinex+PVTGeod+Status+GALRawCNAV"
+# RawNavBits は航法メッセージの生ビット(GPSRawCA など)。RTKLIB 系はこれから放送暦を作る
+BASE_MESSAGES = "Rinex+RawNavBits+PVTGeod+Status+GALRawCNAV"
 L6_MESSAGES = "QZSRawL6D+QZSRawL6E"
 PROBE_COMMANDS = ("getReceiverCapabilities", "lif,Identification")
 
@@ -53,6 +57,8 @@ class Pipeline:  # pylint: disable=too-many-instance-attributes
         self.console = queue.Queue()
         self.prompt = None
         self.info = {}
+        self.settings = {}
+        self.server = None  # SbfTcpServer。SBF ブロックをそのまま配信する
         self._logger = None
         self._log_lock = threading.Lock()
         self._text = ""
@@ -61,7 +67,10 @@ class Pipeline:  # pylint: disable=too-many-instance-attributes
     def process(self, data):
         """受信データを処理する。"""
         blocks, text = self.stream.feed(data)
+        server = self.server
         for block in blocks:
+            if server is not None:
+                server.send(block.raw)
             decoded = self.state.on_block(block)
             with self._log_lock:
                 if self._logger is not None:
@@ -95,6 +104,13 @@ class Pipeline:  # pylint: disable=too-many-instance-attributes
             self.info["firmware"] = firmware.group(1)
         if "ReceiverCapabilities," in text:
             self.info["l6_capable"] = "QZSL6" in text
+        capability = CAPABILITY_RE.search(text)
+        if capability:
+            self.info["signals"] = tuple(capability.group(1).split("+"))
+        errors = ERROR_RE.findall(text)
+        if errors:
+            self.info["error"] = errors[-1].strip()
+        self.settings = {**self.settings, **parse_reply(text)}
 
     def take_prompt(self):
         """プロンプトが来ていれば True を返して印を消す。"""

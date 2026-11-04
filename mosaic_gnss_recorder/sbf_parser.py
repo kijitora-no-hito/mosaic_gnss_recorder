@@ -16,6 +16,9 @@ BLOCK_L6E = 4271
 HEADER_SIZE = 8
 MAX_BLOCK_SIZE = 16384
 L6_MESSAGE_SIZE = 250
+L6_SUBFRAME_START = 0x01  # メッセージ種別(6 バイト目)の最下位ビット: サブフレームの先頭
+L6_MAX_INTERVAL = 1.5     # [s] L6 は衛星ごとに 1 秒 1 フレーム。これを超えたら欠け
+WEEK_SECONDS = 604800
 DO_NOT_USE_FLOAT = -2e10
 
 SIGNAL_NAMES = {
@@ -164,6 +167,35 @@ def decode_l6(number, body):
     data = struct.pack(">63I", *words)[:L6_MESSAGE_SIZE]
     channel = "L6D" if number == BLOCK_L6D else "L6E"
     return L6Message(tow / 1000.0, wnc, svid, channel, bool(parity), rs_count, data)
+
+
+class L6Continuity:  # pylint: disable=too-few-public-methods
+    """衛星・チャネルごとに L6 フレームの連続性を見て、補正の復号に使えるフレームだけを通す。
+
+    CLAS / MADOCA の補正はサブフレーム(複数フレーム)を連結して読むので、途中のフレームが
+    欠けたまま続きを渡すとビット列がずれ、でたらめな補正値になる。欠け(RS 復号の失敗、
+    1 秒を超える間隔)の後は、次のサブフレームの先頭フレームまで捨てる。
+    """
+
+    def __init__(self):
+        self._state = {}  # (チャネル, SVID) -> (最後の TOW, 捨てている途中か)
+        self.dropped = 0
+
+    def accept(self, msg):
+        """msg を .l6 に書いてよいか。RS 失敗のフレームも渡すこと(欠けの検出に使う)。"""
+        key = (msg.channel, msg.svid)
+        last, skip = self._state.get(key, (None, True))
+        if last is not None and (msg.tow - last) % WEEK_SECONDS > L6_MAX_INTERVAL:
+            skip = True
+        if not msg.parity:
+            self._state[key] = (msg.tow, True)
+            return False
+        if skip and not msg.data[5] & L6_SUBFRAME_START:
+            self._state[key] = (msg.tow, True)
+            self.dropped += 1
+            return False
+        self._state[key] = (msg.tow, False)
+        return True
 
 
 def is_tracking(status):
